@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DMS - Trajectory Playback</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        .filter-panel {
+            position: absolute;
+            top: 75px;
+            left: 15px;
+            z-index: 1000;
+            background: rgba(30, 41, 59, 0.95);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            width: 300px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .filter-panel label {
+            display: block;
+            margin-top: 10px;
+            font-size: 0.85rem;
+            color: #cbd5e1;
+        }
+        .filter-panel input {
+            width: 100%;
+            padding: 8px;
+            margin-top: 4px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border-color);
+            color: white;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .controls-bar {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            background: rgba(30, 41, 59, 0.95);
+            padding: 12px 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .controls-bar select {
+            background: var(--bg-dark);
+            color: white;
+            border: 1px solid var(--border-color);
+            padding: 6px 10px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <header class="app-header">
+        <div class="logo-container">
+            <div class="wa-logo" style="font-weight: bold; color: #0284c7; padding: 2px 8px;">WA</div>
+            <div class="app-title">Drone Monitoring System - Trajectory Playback</div>
+        </div>
+        <div>
+            <a href="/" class="menu-btn" style="text-decoration: none;">← Back to Live Map</a>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <!-- Filter Panel -->
+        <div class="filter-panel">
+            <h3 style="margin:0 0 10px 0; font-size:1rem; color:var(--primary-blue);">Select Replay Period</h3>
+            
+            <label>Drone Device ID (Optional):</label>
+            <input type="text" id="targetDroneId" placeholder="e.g. RID-1581F6...">
+
+            <label>Start Date & Time:</label>
+            <input type="datetime-local" id="startTime">
+
+            <label>End Date & Time:</label>
+            <input type="datetime-local" id="endTime">
+
+            <button onclick="loadTrajectoryData()" class="menu-btn" style="width:100%; margin-top:15px;">🔍 Load Trajectory</button>
+        </div>
+
+        <div id="map"></div>
+
+        <!-- Replay Controller Bar -->
+        <div class="controls-bar">
+            <button onclick="startPlayback()" class="menu-btn" style="background:#10b981;">▶ Play</button>
+            <button onclick="pausePlayback()" class="menu-btn" style="background:#ef4444;">⏸ Pause</button>
+            <button onclick="resetPlayback()" class="menu-btn" style="background:#64748b;">🔄 Reset</button>
+            
+            <label style="color:#cbd5e1; font-size:0.85rem;">Speed:</label>
+            <select id="speedSelect">
+                <option value="1000">0.5x</option>
+                <option value="500" selected>1.0x (Normal)</option>
+                <option value="250">2.0x</option>
+                <option value="100">4.0x</option>
+            </select>
+
+            <span id="playbackStatus" style="color:#94a3b8; font-size:0.85rem; margin-left:10px;">Status: Select Time Range</span>
+        </div>
+    </div>
+
+    <script>
+        const map = L.map('map').setView([62.693, 22.824], 14);
+        L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', { maxZoom: 20, subdomains: ['mt0', 'mt1', 'mt2', 'mt3'] }).addTo(map);
+
+        let playbackData = [];
+        let currentIndex = 0;
+        let playbackTimer = null;
+        let replayMarker = null;
+        let pathLine = null;
+        let activePathLine = null;
+
+        function createLuminousArrowIcon(last4, heading) {
+            const rot = heading || 0;
+            const svgHtml = `
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
+                    <svg width="28" height="28" viewBox="0 0 24 24" style="transform: rotate(${rot}deg); filter: drop-shadow(0px 0px 6px #10b981);">
+                        <path d="M12 2L2 22L12 18L22 22L12 2Z" fill="#10b981" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+                    </svg>
+                    <div style="background: rgba(15, 23, 42, 0.9); color: #10b981; font-weight: bold; font-size: 10px; border: 1px solid #10b981; border-radius: 3px; padding: 1px 4px; margin-top: 2px; white-space: nowrap;">
+                        ${last4}
+                    </div>
+                </div>
+            `;
+            return L.divIcon({
+                className: 'custom-drone-arrow-icon',
+                html: svgHtml,
+                iconSize: [40, 50],
+                iconAnchor: [20, 25]
+            });
+        }
+
+        function loadTrajectoryData() {
+            const droneId = document.getElementById('targetDroneId').value.trim();
+            const startTime = document.getElementById('startTime').value;
+            const endTime = document.getElementById('endTime').value;
+
+            let url = `/api/history_data?drone_id=${encodeURIComponent(droneId)}&start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}`;
+
+            document.getElementById('playbackStatus').innerText = "Status: Loading Data...";
+
+            fetch(url)
+                .then(res => res.json())
+                .then(data => {
+                    // Reverse data so replay runs from oldest to newest timestamp
+                    playbackData = data.reverse();
+                    resetPlayback();
+
+                    if (playbackData.length === 0) {
+                        alert("No trajectory records found for the selected time range!");
+                        document.getElementById('playbackStatus').innerText = "Status: No Data Found";
+                        return;
+                    }
+
+                    // Static reference line of entire flight
+                    const latLngs = playbackData.map(d => [parseFloat(d.latitude), parseFloat(d.longitude)]);
+                    if (pathLine) map.removeLayer(pathLine);
+                    
+                    pathLine = L.polyline(latLngs, { color: '#64748b', weight: 2, opacity: 0.5, dashArray: '5, 5' }).addTo(map);
+                    map.fitBounds(pathLine.getBounds());
+
+                    document.getElementById('playbackStatus').innerText = `Status: Loaded ${playbackData.length} Points`;
+                })
+                .catch(err => console.error("Error loading playback:", err));
+        }
+
+        function startPlayback() {
+            if (playbackData.length === 0) return alert("Please load trajectory data first!");
+            if (playbackTimer) clearInterval(playbackTimer);
+
+            const speed = parseInt(document.getElementById('speedSelect').value);
+            document.getElementById('playbackStatus').innerText = "Status: Playing Replay...";
+
+            playbackTimer = setInterval(() => {
+                if (currentIndex >= playbackData.length) {
+                    clearInterval(playbackTimer);
+                    document.getElementById('playbackStatus').innerText = "Status: Replay Finished";
+                    return;
+                }
+
+                const point = playbackData[currentIndex];
+                const pos = [parseFloat(point.latitude), parseFloat(point.longitude)];
+                const heading = parseFloat(point.heading) || 0;
+                const last4 = point.device_id.slice(-4);
+
+                if (!replayMarker) {
+                    replayMarker = L.marker(pos, { icon: createLuminousArrowIcon(last4, heading) }).addTo(map);
+                } else {
+                    replayMarker.setLatLng(pos);
+                    replayMarker.setIcon(createLuminousArrowIcon(last4, heading));
+                }
+
+                // Draw active path dynamically
+                const currentPath = playbackData.slice(0, currentIndex + 1).map(d => [parseFloat(d.latitude), parseFloat(d.longitude)]);
+                if (activePathLine) map.removeLayer(activePathLine);
+                activePathLine = L.polyline(currentPath, { color: '#10b981', weight: 3, opacity: 0.9 }).addTo(map);
+
+                currentIndex++;
+            }, speed);
+        }
+
+        function pausePlayback() {
+            if (playbackTimer) {
+                clearInterval(playbackTimer);
+                document.getElementById('playbackStatus').innerText = "Status: Paused";
+            }
+        }
+
+        function resetPlayback() {
+            pausePlayback();
+            currentIndex = 0;
+            if (replayMarker) {
+                map.removeLayer(replayMarker);
+                replayMarker = null;
+            }
+            if (activePathLine) {
+                map.removeLayer(activePathLine);
+                activePathLine = null;
+            }
+            if (playbackData.length > 0) {
+                document.getElementById('playbackStatus').innerText = "Status: Ready to Play";
+            }
+        }
+    </script>
+</body>
+</html>

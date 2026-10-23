@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DMS - Multi-Source Drone Monitoring System</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+
+    <!-- Header -->
+    <header class="app-header">
+        <div class="logo-container">
+            <div class="wa-logo" style="font-weight: bold; color: #0284c7; padding: 2px 8px;">WA</div>
+            <div class="app-title">Drone Monitoring System</div>
+        </div>
+
+        <div class="menu-dropdown">
+            <button class="menu-btn">Menu ▾</button>
+            <div class="dropdown-content">
+                {% if user.role == 'admin' %}
+                <a href="#" onclick="openModal('geofenceModal')">Restriction Areas Config</a>
+                <a href="#" onclick="openModal('blacklistModal')">Blacklist Config</a>
+                <a href="#" onclick="openUserModal()">User Management</a>
+                {% endif %}
+                <a href="#" onclick="openWarningModal()">Warning / Alert Logs</a>
+                <a href="/history">History Logs & Export</a>
+                {% if user.role == 'admin' %}
+                <a href="/playback" target="_blank">Trajectory Replay Window</a>
+                {% endif %}
+            </div>
+        </div>
+
+        <div>
+            <span style="margin-right: 15px; color: #94a3b8;">User: <strong>{{ user.username }}</strong> ({{ user.role }})</span>
+            <a href="/logout" style="color: #ef4444; text-decoration: none; font-weight: bold;">Logout</a>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="main-container">
+        <div class="map-switcher">
+            <select id="mapLayerSelect" onchange="switchMapLayer(this.value)">
+                <option value="google_normal">Google Maps (Standard)</option>
+                <option value="google_satellite">Google Satellite</option>
+                <option value="osm">OpenStreetMap</option>
+            </select>
+        </div>
+
+        <div class="telemetry-card" id="telemetryCard">
+            <h3>Target Telemetry</h3>
+            <div class="info-row"><span class="info-label">Drone ID:</span><span class="info-val" id="disp_id">--</span></div>
+            <div class="info-row"><span class="info-label">Model:</span><span class="info-val" id="disp_model">--</span></div>
+            <div class="info-row"><span class="info-label">Source:</span><span class="info-val" id="disp_source">--</span></div>
+            <div class="info-row"><span class="info-label">Lat, Lon:</span><span class="info-val" id="disp_pos">--</span></div>
+            <div class="info-row"><span class="info-label">Altitude:</span><span class="info-val" id="disp_alt">-- m</span></div>
+            <div class="info-row"><span class="info-label">Speed:</span><span class="info-val" id="disp_spd">-- m/s</span></div>
+            <div class="info-row"><span class="info-label">Azimuth/Heading:</span><span class="info-val" id="disp_hdg">--°</span></div>
+        </div>
+
+        <div id="map"></div>
+
+        <!-- Toast Warning Container (Stacked Alerts) -->
+        <div id="warningToastContainer" style="position:fixed; bottom:50px; right:20px; z-index:2000; display:flex; flex-direction:column; gap:10px; max-height:80vh; overflow-y:auto; pointer-events:none;"></div>
+    </div>
+
+    <!-- Footer with Hardware Status Indicators -->
+    <footer class="app-footer">
+        <div style="display: flex; gap: 20px; align-items: center;">
+            <div>Wi-Fi Sniffer: <span id="wifi_led" style="color: #ef4444; font-weight: bold;">● Disconnected</span></div>
+            <div>Network RID (Cloud): <span id="mqtt_led" style="color: #ef4444; font-weight: bold;">● Disconnected</span></div>
+        </div>
+        <div class="seamk-logo" style="font-weight: bold; color: #4338ca; padding: 2px 6px;">SEAMK</div>
+    </footer>
+
+    <!-- Modals -->
+    <div id="geofenceModal" class="modal">
+        <div class="modal-content">
+            <h3>Add Restriction Area</h3>
+            <label>Area Name:</label>
+            <input type="text" id="gf_name" placeholder="e.g. Airport No-Fly Zone">
+            <label>GPS Coordinates (Format: lat,lon; lat,lon):</label>
+            <input type="text" id="gf_coords" placeholder="62.693,22.824; 62.695,22.828; 62.691,22.830">
+            <label>Start Time:</label>
+            <input type="datetime-local" id="gf_start">
+            <label>End Time:</label>
+            <input type="datetime-local" id="gf_end">
+            <input type="checkbox" id="gf_never_expires" style="width:auto;"> <label for="gf_never_expires">Never Expires</label><br><br>
+            <label>Vertical Restriction Mode:</label>
+            <select id="gf_vert_mode" style="width:100%; padding:8px; background:#121824; color:white; border:1px solid #334155;">
+                <option value="whole">Whole Airspace Area</option>
+                <option value="above">Above Altitude Limit</option>
+                <option value="below">Below Altitude Limit</option>
+            </select><br><br>
+            <label>Altitude Limit (Meters):</label>
+            <input type="number" id="gf_alt_limit" placeholder="e.g. 250">
+            <button onclick="saveGeofence()" class="menu-btn" style="width:100%;">Save Restriction Area</button>
+            <button onclick="closeModal('geofenceModal')" style="width:100%; margin-top:5px; background:#64748b;" class="menu-btn">Cancel</button>
+        </div>
+    </div>
+
+    <div id="blacklistModal" class="modal">
+        <div class="modal-content">
+            <h3>Blacklist Configuration</h3>
+            <label>Drone Device ID:</label>
+            <input type="text" id="bl_device_id" placeholder="RID-1581F6...">
+            <label>Reason:</label>
+            <input type="text" id="bl_reason" placeholder="Unauthorized flight">
+            <button onclick="saveBlacklist()" class="menu-btn" style="width:100%;">Add to Blacklist</button>
+            <button onclick="closeModal('blacklistModal')" style="width:100%; margin-top:5px; background:#64748b;" class="menu-btn">Close</button>
+        </div>
+    </div>
+
+    <div id="userModal" class="modal">
+        <div class="modal-content">
+            <h3>User Management</h3>
+            <h4 style="margin-bottom:5px; color:#0284c7;">Create New Account</h4>
+            <label>Username:</label>
+            <input type="text" id="new_username" placeholder="e.g. operator1">
+            <label>Password:</label>
+            <input type="password" id="new_password" placeholder="••••••••">
+            <label>User Role:</label>
+            <select id="new_role" style="width:100%; padding:8px; background:#121824; color:white; border:1px solid #334155;">
+                <option value="user">Basic User (View Only)</option>
+                <option value="admin">Administrator (Full Access)</option>
+            </select><br><br>
+            <button onclick="saveUser()" class="menu-btn" style="width:100%;">Create Account</button>
+            <hr style="border: 0.5px solid #334155; margin: 15px 0;">
+            <h4 style="margin-bottom:5px; color:#ef4444;">Existing Accounts</h4>
+            <div id="usersListContainer" style="max-height: 120px; overflow-y: auto; background: #121824; padding: 8px; border-radius: 4px; border: 1px solid #334155;"></div>
+            <button onclick="closeModal('userModal')" style="width:100%; margin-top:15px; background:#64748b;" class="menu-btn">Close</button>
+        </div>
+    </div>
+
+    <div id="warningModal" class="modal">
+        <div class="modal-content" style="width:550px;">
+            <h3>Warning & Alert History Logs</h3>
+            <div id="warningLogsContainer" style="max-height: 250px; overflow-y: auto; background: #121824; padding: 10px; border-radius: 4px; border: 1px solid #334155; font-size: 0.85rem;"></div>
+            <button onclick="closeModal('warningModal')" style="width:100%; margin-top:15px; background:#64748b;" class="menu-btn">Close</button>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/map.js') }}"></script>
+</body>
+</html>
